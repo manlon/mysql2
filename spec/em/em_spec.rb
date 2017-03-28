@@ -4,7 +4,7 @@ begin
   require 'eventmachine'
   require 'mysql2/em'
 
-  describe Mysql2::EM::Client do
+  RSpec.describe Mysql2::EM::Client do
     it "should support async queries" do
       results = []
       EM.run do
@@ -24,8 +24,8 @@ begin
         end
       end
 
-      results[0].keys.should include("second_query")
-      results[1].keys.should include("first_query")
+      expect(results[0].keys).to include("second_query")
+      expect(results[1].keys).to include("first_query")
     end
 
     it "should support queries in callbacks" do
@@ -44,38 +44,38 @@ begin
         end
       end
 
-      results[0].keys.should include("first_query")
-      results[1].keys.should include("second_query")
+      expect(results[0].keys).to include("first_query")
+      expect(results[1].keys).to include("second_query")
     end
 
     it "should not swallow exceptions raised in callbacks" do
-      lambda {
+      expect {
         EM.run do
           client = Mysql2::EM::Client.new DatabaseCredentials['root']
           defer = client.query "SELECT sleep(0.1) as first_query"
-          defer.callback do |result|
+          defer.callback do
             client.close
-            raise 'some error'
+            fail 'some error'
           end
-          defer.errback do |err|
+          defer.errback do
             # This _shouldn't_ be run, but it needed to prevent the specs from
             # freezing if this test fails.
             EM.stop_event_loop
           end
         end
-      }.should raise_error
+      }.to raise_error('some error')
     end
 
     context 'when an exception is raised by the client' do
       let(:client) { Mysql2::EM::Client.new DatabaseCredentials['root'] }
       let(:error) { StandardError.new('some error') }
-      before { client.stub(:async_result).and_raise(error) }
+      before { allow(client).to receive(:async_result).and_raise(error) }
 
       it "should swallow exceptions raised in by the client" do
         errors = []
         EM.run do
           defer = client.query "SELECT sleep(0.1) as first_query"
-          defer.callback do |result|
+          defer.callback do
             # This _shouldn't_ be run, but it is needed to prevent the specs from
             # freezing if this test fails.
             EM.stop_event_loop
@@ -85,7 +85,7 @@ begin
             EM.stop_event_loop
           end
         end
-        errors.should == [error]
+        expect(errors).to eq([error])
       end
 
       it "should fail the deferrable" do
@@ -93,19 +93,19 @@ begin
         EM.run do
           defer = client.query "SELECT sleep(0.025) as first_query"
           EM.add_timer(0.1) do
-            defer.callback do |result|
+            defer.callback do
               callbacks_run << :callback
               # This _shouldn't_ be run, but it is needed to prevent the specs from
               # freezing if this test fails.
               EM.stop_event_loop
             end
-            defer.errback do |err|
+            defer.errback do
               callbacks_run << :errback
               EM.stop_event_loop
             end
           end
         end
-        callbacks_run.should == [:errback]
+        expect(callbacks_run).to eq([:errback])
       end
     end
 
@@ -114,17 +114,17 @@ begin
       EM.run do
         client = Mysql2::EM::Client.new DatabaseCredentials['root']
         defer = client.query("select sleep(0.025)")
-        defer.callback do |result|
+        defer.callback do
           callbacks_run << :callback
         end
-        defer.errback do |err|
+        defer.errback do
           callbacks_run << :errback
         end
         EM.add_timer(0.1) do
-          callbacks_run.should == [:callback]
-          lambda {
+          expect(callbacks_run).to eq([:callback])
+          expect {
             client.close
-          }.should_not raise_error(/invalid binding to detach/)
+          }.not_to raise_error
           EM.stop_event_loop
         end
       end

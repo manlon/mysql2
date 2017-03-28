@@ -2,25 +2,31 @@
 
 module Mysql2
   class Error < StandardError
-    REPLACEMENT_CHAR = '?'
-    ENCODE_OPTS      = {:undef => :replace, :invalid => :replace, :replace => REPLACEMENT_CHAR}
+    ENCODE_OPTS = {
+      :undef => :replace,
+      :invalid => :replace,
+      :replace => '?'.freeze,
+    }.freeze
 
-    attr_accessor :error_number
-    attr_reader   :sql_state
-    attr_writer   :server_version
+    attr_reader :error_number, :sql_state
 
     # Mysql gem compatibility
     alias_method :errno, :error_number
     alias_method :error, :message
 
-    def initialize(msg, server_version=nil)
-      self.server_version = server_version
+    def initialize(msg)
+      @server_version ||= nil
 
       super(clean_message(msg))
     end
 
-    def sql_state=(state)
-      @sql_state = ''.respond_to?(:encode) ? state.encode(ENCODE_OPTS) : state
+    def self.new_with_args(msg, server_version, error_number, sql_state)
+      err = allocate
+      err.instance_variable_set('@server_version', server_version)
+      err.instance_variable_set('@error_number', error_number)
+      err.instance_variable_set('@sql_state', sql_state.respond_to?(:encode) ? sql_state.encode(ENCODE_OPTS) : sql_state)
+      err.send(:initialize, msg)
+      err
     end
 
     private
@@ -53,27 +59,12 @@ module Mysql2
     #
     # Returns a valid UTF-8 string in Ruby 1.9+, the original string on Ruby 1.8
     def clean_message(message)
-      return message if !message.respond_to?(:encoding)
+      return message unless message.respond_to?(:encode)
 
       if @server_version && @server_version > 50500
         message.encode(ENCODE_OPTS)
       else
-        if message.respond_to? :scrub
-          message.scrub(REPLACEMENT_CHAR).encode(ENCODE_OPTS)
-        else
-          # This is ugly as hell but Ruby 1.9 doesn't provide a way to clean a string
-          # and retain it's valid UTF-8 characters, that I know of.
-
-          new_message = "".force_encoding(Encoding::UTF_8)
-          message.chars.each do |char|
-            if char.valid_encoding?
-              new_message << char
-            else
-              new_message << REPLACEMENT_CHAR
-            end
-          end
-          new_message.encode(ENCODE_OPTS)
-        end
+        message.encode(Encoding::UTF_8, ENCODE_OPTS)
       end
     end
   end

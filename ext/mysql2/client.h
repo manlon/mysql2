@@ -43,6 +43,7 @@ typedef struct {
   int reconnect_enabled;
   unsigned int connect_timeout;
   int active;
+  int automatic_close;
   int connected;
   int initialized;
   int refcount;
@@ -50,7 +51,17 @@ typedef struct {
   MYSQL *client;
 } mysql_client_wrapper;
 
-void init_mysql2_client();
+void rb_mysql_client_set_active_thread(VALUE self);
+
+#define GET_CLIENT(self) \
+  mysql_client_wrapper *wrapper; \
+  Data_Get_Struct(self, mysql_client_wrapper, wrapper);
+
+void init_mysql2_client(void);
 void decr_mysql2_client(mysql_client_wrapper *wrapper);
 
+#endif
+
+#ifndef HAVE_RB_HASH_DUP
+VALUE rb_hash_dup(VALUE other);
 #endif
