@@ -7,7 +7,7 @@ The Mysql2 gem is meant to serve the extremely common use-case of connecting, qu
 Some database libraries out there serve as direct 1:1 mappings of the already complex C APIs available.
 This one is not.
 
-It also forces the use of UTF-8 [or binary] for the connection [and all strings in 1.9, unless Encoding.default_internal is set then it'll convert from UTF-8 to that encoding] and uses encoding-aware MySQL API calls where it can.
+It also forces the use of UTF-8 [or binary] for the connection and uses encoding-aware MySQL API calls where it can.
 
 The API consists of three classes:
 
@@ -85,6 +85,9 @@ You may use MacPorts, Homebrew, or a native MySQL installer package. The most
 common paths will be automatically searched. If you want to select a specific
 MySQL directory, use the `--with-mysql-dir` or `--with-mysql-config` options above.
 
+If you have not done so already, you will need to install the XCode select tools by running
+`xcode-select --install`.
+
 ### Windows
 Make sure that you have Ruby and the DevKit compilers installed. We recommend
 the [Ruby Installer](http://rubyinstaller.org) distribution.
@@ -109,7 +112,7 @@ Connect to a database:
 ``` ruby
 # this takes a hash of options, almost all of which map directly
 # to the familiar database.yml in rails
-# See http://api.rubyonrails.org/classes/ActiveRecord/ConnectionAdapters/MysqlAdapter.html
+# See http://api.rubyonrails.org/classes/ActiveRecord/ConnectionAdapters/Mysql2Adapter.html
 client = Mysql2::Client.new(:host => "localhost", :username => "root")
 ```
 
@@ -172,7 +175,8 @@ end
 Prepared statements are supported, as well. In a prepared statement, use a `?`
 in place of each value and then execute the statement to retrieve a result set.
 Pass your arguments to the execute method in the same number and order as the
-question marks in the statement.
+question marks in the statement. Query options can be passed as keyword arguments
+to the execute method.
 
 ``` ruby
 statement = @client.prepare("SELECT * FROM users WHERE login_count = ?")
@@ -181,6 +185,9 @@ result2 = statement.execute(2)
 
 statement = @client.prepare("SELECT * FROM users WHERE last_login >= ? AND location LIKE ?")
 result = statement.execute(1, "CA")
+
+statement = @client.prepare("SELECT * FROM users WHERE last_login >= ? AND location LIKE ?")
+result = statement.execute(1, "CA", :as => :array)
 ```
 
 ## Connection options
@@ -200,6 +207,7 @@ Mysql2::Client.new(
   :read_timeout = seconds,
   :write_timeout = seconds,
   :connect_timeout = seconds,
+  :connect_attrs = {:program_name => $PROGRAM_NAME, ...},
   :reconnect = true/false,
   :local_infile = true/false,
   :secure_auth = true/false,
@@ -210,6 +218,18 @@ Mysql2::Client.new(
   )
 ```
 
+### Connecting to MySQL on localhost and elsewhere
+
+The underlying MySQL client library uses the `:host` parameter to determine the
+type of connection to make, with special interpretation you should be aware of:
+
+* An empty value or `"localhost"` will attempt a local connection:
+  * On Unix, connect to the default local socket path. (To set a custom socket
+    path, use the `:socket` parameter).
+  * On Windows, connect using a shared-memory connection, if enabled, or TCP.
+* A value of `"."` on Windows specifies a named-pipe connection.
+* An IPv4 or IPv6 address will result in a TCP connection.
+* Any other value will be looked up as a hostname for a TCP connection.
 
 ### SSL options
 
@@ -230,47 +250,6 @@ Mysql2::Client.new(
   :sslcipher => 'DHE-RSA-AES256-SHA',
   :sslverify => true,
   )
-```
-
-### Multiple result sets
-
-You can also retrieve multiple result sets. For this to work you need to
-connect with flags `Mysql2::Client::MULTI_STATEMENTS`. Multiple result sets can
-be used with stored procedures that return more than one result set, and for
-bundling several SQL statements into a single call to `client.query`.
-
-``` ruby
-client = Mysql2::Client.new(:host => "localhost", :username => "root", :flags => Mysql2::Client::MULTI_STATEMENTS)
-result = client.query('CALL sp_customer_list( 25, 10 )')
-# result now contains the first result set
-while client.next_result
-  result = client.store_result
-  # result now contains the next result set
-end
-```
-
-Repeated calls to `client.next_result` will return true, false, or raise an
-exception if the respective query erred. When `client.next_result` returns true,
-call `client.store_result` to retrieve a result object. Exceptions are not
-raised until `client.next_result` is called to find the status of the respective
-query. Subsequent queries are not executed if an earlier query raised an
-exception. Subsequent calls to `client.next_result` will return false.
-
-``` ruby
-result = client.query('SELECT 1; SELECT 2; SELECT A; SELECT 3')
-p result.first
-
-while client.next_result
-  result = client.store_result
-  p result.first
-end
-```
-
-Yields:
-```
-{"1"=>1}
-{"2"=>2}
-next_result: Unknown column 'A' in 'field list' (Mysql2::Error)
 ```
 
 ### Secure auth
@@ -329,6 +308,47 @@ It is useful if you want to provide session options which survive reconnection.
 Mysql2::Client.new(:init_command => "SET @@SESSION.sql_mode = 'STRICT_ALL_TABLES'")
 ```
 
+### Multiple result sets
+
+You can also retrieve multiple result sets. For this to work you need to
+connect with flags `Mysql2::Client::MULTI_STATEMENTS`. Multiple result sets can
+be used with stored procedures that return more than one result set, and for
+bundling several SQL statements into a single call to `client.query`.
+
+``` ruby
+client = Mysql2::Client.new(:host => "localhost", :username => "root", :flags => Mysql2::Client::MULTI_STATEMENTS)
+result = client.query('CALL sp_customer_list( 25, 10 )')
+# result now contains the first result set
+while client.next_result
+  result = client.store_result
+  # result now contains the next result set
+end
+```
+
+Repeated calls to `client.next_result` will return true, false, or raise an
+exception if the respective query erred. When `client.next_result` returns true,
+call `client.store_result` to retrieve a result object. Exceptions are not
+raised until `client.next_result` is called to find the status of the respective
+query. Subsequent queries are not executed if an earlier query raised an
+exception. Subsequent calls to `client.next_result` will return false.
+
+``` ruby
+result = client.query('SELECT 1; SELECT 2; SELECT A; SELECT 3')
+p result.first
+
+while client.next_result
+  result = client.store_result
+  p result.first
+end
+```
+
+Yields:
+```
+{"1"=>1}
+{"2"=>2}
+next_result: Unknown column 'A' in 'field list' (Mysql2::Error)
+```
+
 ## Cascading config
 
 The default config hash is at:
@@ -364,6 +384,15 @@ or
 # this will set the options for the Mysql2::Result instance returned from the #query method
 c = Mysql2::Client.new
 c.query(sql, :symbolize_keys => true)
+```
+
+or
+
+``` ruby
+# this will set the options for the Mysql2::Result instance returned from the #execute method
+c = Mysql2::Client.new
+s = c.prepare(sql)
+s.execute(arg1, args2, :symbolize_keys => true)
 ```
 
 ## Result types
@@ -494,15 +523,14 @@ As for field values themselves, I'm workin on it - but expect that soon.
 
 This gem is tested with the following Ruby versions on Linux and Mac OS X:
 
- * Ruby MRI 1.8.7, 1.9.3, 2.0.0, 2.1.x, 2.2.x, 2.3.x, 2.4.x
- * Ruby Enterprise Edition (based on MRI 1.8.7)
+ * Ruby MRI 2.0.0, 2.1.x, 2.2.x, 2.3.x, 2.4.x, 2.5.x
  * Rubinius 2.x and 3.x do work but may fail under some workloads
 
 This gem is tested with the following MySQL and MariaDB versions:
 
  * MySQL 5.5, 5.6, 5.7, 8.0
  * MySQL Connector/C 6.0 and 6.1 (primarily on Windows)
- * MariaDB 5.5, 10.0, 10.1
+ * MariaDB 5.5, 10.0, 10.1, 10.2
 
 ### Ruby on Rails / Active Record
 
