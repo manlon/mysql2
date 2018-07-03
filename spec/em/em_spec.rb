@@ -1,4 +1,3 @@
-# encoding: UTF-8
 require 'spec_helper'
 begin
   require 'eventmachine'
@@ -49,13 +48,13 @@ begin
     end
 
     it "should not swallow exceptions raised in callbacks" do
-      expect {
+      expect do
         EM.run do
           client = Mysql2::EM::Client.new DatabaseCredentials['root']
           defer = client.query "SELECT sleep(0.1) as first_query"
           defer.callback do
             client.close
-            fail 'some error'
+            raise 'some error'
           end
           defer.errback do
             # This _shouldn't_ be run, but it needed to prevent the specs from
@@ -63,13 +62,14 @@ begin
             EM.stop_event_loop
           end
         end
-      }.to raise_error('some error')
+      end.to raise_error('some error')
     end
 
     context 'when an exception is raised by the client' do
       let(:client) { Mysql2::EM::Client.new DatabaseCredentials['root'] }
       let(:error) { StandardError.new('some error') }
       before { allow(client).to receive(:async_result).and_raise(error) }
+      after { client.close }
 
       it "should swallow exceptions raised in by the client" do
         errors = []
@@ -122,9 +122,9 @@ begin
         end
         EM.add_timer(0.1) do
           expect(callbacks_run).to eq([:callback])
-          expect {
+          expect do
             client.close
-          }.not_to raise_error
+          end.not_to raise_error
           EM.stop_event_loop
         end
       end

@@ -1,13 +1,9 @@
-# encoding: UTF-8
-
 require 'spec_helper'
 
 RSpec.describe Mysql2::Error do
-  let(:client) { Mysql2::Client.new(DatabaseCredentials['root']) }
-
   let(:error) do
     begin
-      client.query("HAHAHA")
+      @client.query("HAHAHA")
     rescue Mysql2::Error => e
       error = e
     end
@@ -28,7 +24,7 @@ RSpec.describe Mysql2::Error do
     let(:valid_utf8) { '造字' }
     let(:error) do
       begin
-        client.query(valid_utf8)
+        @client.query(valid_utf8)
       rescue Mysql2::Error => e
         e
       end
@@ -37,15 +33,13 @@ RSpec.describe Mysql2::Error do
     let(:invalid_utf8) { ["e5c67d1f"].pack('H*').force_encoding(Encoding::UTF_8) }
     let(:bad_err) do
       begin
-        client.query(invalid_utf8)
+        @client.query(invalid_utf8)
       rescue Mysql2::Error => e
         e
       end
     end
 
     before do
-      pending('String#encoding is not defined') unless String.public_method_defined?(:encoding)
-
       # sanity check
       expect(valid_utf8.encoding).to eql(Encoding::UTF_8)
       expect(valid_utf8).to be_valid_encoding

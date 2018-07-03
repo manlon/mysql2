@@ -2,51 +2,19 @@
 
 #include "mysql_enc_to_ruby.h"
 
-#ifdef HAVE_RUBY_ENCODING_H
 static rb_encoding *binaryEncoding;
-#endif
 
-#if (SIZEOF_INT < SIZEOF_LONG) || defined(HAVE_RUBY_ENCODING_H)
 /* on 64bit platforms we can handle dates way outside 2038-01-19T03:14:07
  *
  * (9999*31557600) + (12*2592000) + (31*86400) + (11*3600) + (59*60) + 59
  */
 #define MYSQL2_MAX_TIME 315578267999ULL
-#else
-/**
- * On 32bit platforms the maximum date the Time class can handle is 2038-01-19T03:14:07
- * 2038 years + 1 month + 19 days + 3 hours + 14 minutes + 7 seconds = 64318634047 seconds
- *
- * (2038*31557600) + (1*2592000) + (19*86400) + (3*3600) + (14*60) + 7
- */
-#define MYSQL2_MAX_TIME 64318634047ULL
-#endif
 
-#if defined(HAVE_RUBY_ENCODING_H)
 /* 0000-1-1 00:00:00 UTC
  *
  * (0*31557600) + (1*2592000) + (1*86400) + (0*3600) + (0*60) + 0
  */
 #define MYSQL2_MIN_TIME 2678400ULL
-#elif SIZEOF_INT < SIZEOF_LONG /* 64bit Ruby 1.8 */
-/* 0139-1-1 00:00:00 UTC
- *
- * (139*31557600) + (1*2592000) + (1*86400) + (0*3600) + (0*60) + 0
- */
-#define MYSQL2_MIN_TIME 4389184800ULL
-#elif defined(NEGATIVE_TIME_T)
-/* 1901-12-13 20:45:52 UTC : The oldest time in 32-bit signed time_t.
- *
- * (1901*31557600) + (12*2592000) + (13*86400) + (20*3600) + (45*60) + 52
- */
-#define MYSQL2_MIN_TIME 60023299552ULL
-#else
-/* 1970-01-01 00:00:01 UTC : The Unix epoch - the oldest time in portable time_t.
- *
- * (1970*31557600) + (1*2592000) + (1*86400) + (0*3600) + (0*60) + 1
- */
-#define MYSQL2_MIN_TIME 62171150401ULL
-#endif
 
 #define GET_RESULT(self) \
   mysql2_result_wrapper *wrapper; \
@@ -64,14 +32,14 @@ typedef struct {
   VALUE block_given;
 } result_each_args;
 
-VALUE cBigDecimal, cDateTime, cDate;
-static VALUE cMysql2Result;
-static VALUE opt_decimal_zero, opt_float_zero, opt_time_year, opt_time_month, opt_utc_offset;
 extern VALUE mMysql2, cMysql2Client, cMysql2Error;
-static ID intern_new, intern_utc, intern_local, intern_localtime, intern_local_offset, intern_civil, intern_new_offset;
-static VALUE sym_symbolize_keys, sym_as, sym_array, sym_database_timezone, sym_application_timezone,
-          sym_local, sym_utc, sym_cast_booleans, sym_cache_rows, sym_cast, sym_stream, sym_name;
-static ID intern_merge;
+static VALUE cMysql2Result, cDateTime, cDate;
+static VALUE opt_decimal_zero, opt_float_zero, opt_time_year, opt_time_month, opt_utc_offset;
+static ID intern_new, intern_utc, intern_local, intern_localtime, intern_local_offset,
+  intern_civil, intern_new_offset, intern_merge, intern_BigDecimal;
+static VALUE sym_symbolize_keys, sym_as, sym_array, sym_database_timezone,
+  sym_application_timezone, sym_local, sym_utc, sym_cast_booleans,
+  sym_cache_rows, sym_cast, sym_stream, sym_name;
 
 /* Mark any VALUEs that are only referenced in C, so the GC won't get them. */
 static void rb_mysql_result_mark(void * wrapper) {
@@ -179,29 +147,19 @@ static VALUE rb_mysql_result_fetch_field(VALUE self, unsigned int idx, int symbo
   rb_field = rb_ary_entry(wrapper->fields, idx);
   if (rb_field == Qnil) {
     MYSQL_FIELD *field = NULL;
-#ifdef HAVE_RUBY_ENCODING_H
     rb_encoding *default_internal_enc = rb_default_internal_encoding();
     rb_encoding *conn_enc = rb_to_encoding(wrapper->encoding);
-#endif
 
     field = mysql_fetch_field_direct(wrapper->result, idx);
     if (symbolize_keys) {
-#ifdef HAVE_RB_INTERN3
       rb_field = rb_intern3(field->name, field->name_length, rb_utf8_encoding());
       rb_field = ID2SYM(rb_field);
-#else
-      VALUE colStr;
-      colStr = rb_str_new(field->name, field->name_length);
-      rb_field = ID2SYM(rb_to_id(colStr));
-#endif
     } else {
       rb_field = rb_str_new(field->name, field->name_length);
-#ifdef HAVE_RUBY_ENCODING_H
       rb_enc_associate(rb_field, conn_enc);
       if (default_internal_enc) {
         rb_field = rb_str_export_to_enc(rb_field, default_internal_enc);
       }
-#endif
     }
     rb_ary_store(wrapper->fields, idx, rb_field);
   }
@@ -209,7 +167,6 @@ static VALUE rb_mysql_result_fetch_field(VALUE self, unsigned int idx, int symbo
   return rb_field;
 }
 
-#ifdef HAVE_RUBY_ENCODING_H
 static VALUE mysql2_set_field_string_encoding(VALUE val, MYSQL_FIELD field, rb_encoding *default_internal_enc, rb_encoding *conn_enc) {
   /* if binary flag is set, respect its wishes */
   if (field.flags & BINARY_FLAG && field.charsetnr == 63) {
@@ -222,7 +179,8 @@ static VALUE mysql2_set_field_string_encoding(VALUE val, MYSQL_FIELD field, rb_e
     const char *enc_name;
     int enc_index;
 
-    enc_name = mysql2_mysql_enc_to_rb[field.charsetnr-1];
+    enc_name = (field.charsetnr-1 < CHARSETNR_SIZE) ? mysql2_mysql_enc_to_rb[field.charsetnr-1] : NULL;
+    
     if (enc_name != NULL) {
       /* use the field encoding we were able to match */
       enc_index = rb_enc_find_index(enc_name);
@@ -238,7 +196,6 @@ static VALUE mysql2_set_field_string_encoding(VALUE val, MYSQL_FIELD field, rb_e
   }
   return val;
 }
-#endif
 
 /* Interpret microseconds digits left-aligned in fixed-width field.
  * e.g. 10.123 seconds means 10 seconds and 123000 microseconds,
@@ -278,12 +235,12 @@ static void rb_mysql_result_alloc_result_buffers(VALUE self, MYSQL_FIELD *fields
         wrapper->result_buffers[i].buffer_length = sizeof(signed char);
         break;
       case MYSQL_TYPE_SHORT:        // short int
+      case MYSQL_TYPE_YEAR:         // short int
         wrapper->result_buffers[i].buffer = xcalloc(1, sizeof(short int));
         wrapper->result_buffers[i].buffer_length = sizeof(short int);
         break;
       case MYSQL_TYPE_INT24:        // int
       case MYSQL_TYPE_LONG:         // int
-      case MYSQL_TYPE_YEAR:         // int
         wrapper->result_buffers[i].buffer = xcalloc(1, sizeof(int));
         wrapper->result_buffers[i].buffer_length = sizeof(int);
         break;
@@ -335,16 +292,12 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
   VALUE rowVal;
   unsigned int i = 0;
 
-#ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *default_internal_enc;
   rb_encoding *conn_enc;
-#endif
   GET_RESULT(self);
 
-#ifdef HAVE_RUBY_ENCODING_H
   default_internal_enc = rb_default_internal_encoding();
   conn_enc = rb_to_encoding(wrapper->encoding);
-#endif
 
   if (wrapper->fields == Qnil) {
     wrapper->numberOfFields = mysql_num_fields(wrapper->result);
@@ -405,7 +358,15 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
             val = INT2NUM(*((signed char*)result_buffer->buffer));
           }
           break;
+        case MYSQL_TYPE_BIT:        /* BIT field (MySQL 5.0.3 and up) */
+          if (args->castBool && fields[i].length == 1) {
+            val = (*((unsigned char*)result_buffer->buffer) != 0) ? Qtrue : Qfalse;
+          }else{
+            val = rb_str_new(result_buffer->buffer, *(result_buffer->length));
+          }
+          break;
         case MYSQL_TYPE_SHORT:        // short int
+        case MYSQL_TYPE_YEAR:         // short int
           if (result_buffer->is_unsigned) {
             val = UINT2NUM(*((unsigned short int*)result_buffer->buffer));
           } else  {
@@ -414,7 +375,6 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
           break;
         case MYSQL_TYPE_INT24:        // int
         case MYSQL_TYPE_LONG:         // int
-        case MYSQL_TYPE_YEAR:         // int
           if (result_buffer->is_unsigned) {
             val = UINT2NUM(*((unsigned int*)result_buffer->buffer));
           } else {
@@ -485,7 +445,7 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
         }
         case MYSQL_TYPE_DECIMAL:      // char[]
         case MYSQL_TYPE_NEWDECIMAL:   // char[]
-          val = rb_funcall(cBigDecimal, intern_new, 1, rb_str_new(result_buffer->buffer, *(result_buffer->length)));
+          val = rb_funcall(rb_mKernel, intern_BigDecimal, 1, rb_str_new(result_buffer->buffer, *(result_buffer->length)));
           break;
         case MYSQL_TYPE_STRING:       // char[]
         case MYSQL_TYPE_VAR_STRING:   // char[]
@@ -494,15 +454,12 @@ static VALUE rb_mysql_result_fetch_row_stmt(VALUE self, MYSQL_FIELD * fields, co
         case MYSQL_TYPE_BLOB:         // char[]
         case MYSQL_TYPE_MEDIUM_BLOB:  // char[]
         case MYSQL_TYPE_LONG_BLOB:    // char[]
-        case MYSQL_TYPE_BIT:          // char[]
         case MYSQL_TYPE_SET:          // char[]
         case MYSQL_TYPE_ENUM:         // char[]
         case MYSQL_TYPE_GEOMETRY:     // char[]
         default:
           val = rb_str_new(result_buffer->buffer, *(result_buffer->length));
-#ifdef HAVE_RUBY_ENCODING_H
           val = mysql2_set_field_string_encoding(val, fields[i], default_internal_enc, conn_enc);
-#endif
           break;
       }
     }
@@ -524,16 +481,12 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, MYSQL_FIELD * fields, const r
   unsigned int i = 0;
   unsigned long * fieldLengths;
   void * ptr;
-#ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *default_internal_enc;
   rb_encoding *conn_enc;
-#endif
   GET_RESULT(self);
 
-#ifdef HAVE_RUBY_ENCODING_H
   default_internal_enc = rb_default_internal_encoding();
   conn_enc = rb_to_encoding(wrapper->encoding);
-#endif
 
   ptr = wrapper->result;
   row = (MYSQL_ROW)rb_thread_call_without_gvl(nogvl_fetch_row, ptr, RUBY_UBF_IO, 0);
@@ -563,9 +516,7 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, MYSQL_FIELD * fields, const r
           val = Qnil;
         } else {
           val = rb_str_new(row[i], fieldLengths[i]);
-#ifdef HAVE_RUBY_ENCODING_H
           val = mysql2_set_field_string_encoding(val, fields[i], default_internal_enc, conn_enc);
-#endif
         }
       } else {
         switch(type) {
@@ -596,9 +547,9 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, MYSQL_FIELD * fields, const r
           if (fields[i].decimals == 0) {
             val = rb_cstr2inum(row[i], 10);
           } else if (strtod(row[i], NULL) == 0.000000){
-            val = rb_funcall(cBigDecimal, intern_new, 1, opt_decimal_zero);
+            val = rb_funcall(rb_mKernel, intern_BigDecimal, 1, opt_decimal_zero);
           }else{
-            val = rb_funcall(cBigDecimal, intern_new, 1, rb_str_new(row[i], fieldLengths[i]));
+            val = rb_funcall(rb_mKernel, intern_BigDecimal, 1, rb_str_new(row[i], fieldLengths[i]));
           }
           break;
         case MYSQL_TYPE_FLOAT:      /* FLOAT field */
@@ -716,9 +667,7 @@ static VALUE rb_mysql_result_fetch_row(VALUE self, MYSQL_FIELD * fields, const r
         case MYSQL_TYPE_GEOMETRY:   /* Spatial fielda */
         default:
           val = rb_str_new(row[i], fieldLengths[i]);
-#ifdef HAVE_RUBY_ENCODING_H
           val = mysql2_set_field_string_encoding(val, fields[i], default_internal_enc, conn_enc);
-#endif
           break;
         }
       }
@@ -1011,7 +960,6 @@ VALUE rb_mysql_result_to_obj(VALUE client, VALUE encoding, VALUE options, MYSQL_
 }
 
 void init_mysql2_result() {
-  cBigDecimal = rb_const_get(rb_cObject, rb_intern("BigDecimal"));
   cDate = rb_const_get(rb_cObject, rb_intern("Date"));
   cDateTime = rb_const_get(rb_cObject, rb_intern("DateTime"));
 
@@ -1030,6 +978,7 @@ void init_mysql2_result() {
   intern_local_offset = rb_intern("local_offset");
   intern_civil        = rb_intern("civil");
   intern_new_offset   = rb_intern("new_offset");
+  intern_BigDecimal   = rb_intern("BigDecimal");
 
   sym_symbolize_keys  = ID2SYM(rb_intern("symbolize_keys"));
   sym_as              = ID2SYM(rb_intern("as"));
@@ -1052,7 +1001,5 @@ void init_mysql2_result() {
   opt_time_month = INT2NUM(1);
   opt_utc_offset = INT2NUM(0);
 
-#ifdef HAVE_RUBY_ENCODING_H
   binaryEncoding = rb_enc_find("binary");
-#endif
 }
