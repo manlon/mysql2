@@ -52,6 +52,7 @@ create_table_sql = %[
 @client = Mysql2::Client.new :host => "localhost", :username => "root", :database => "test"
 
 @client.query create_table_sql
+@client.query 'TRUNCATE mysql2_test'
 
 def insert_record(args)
   insert_sql = "
@@ -85,30 +86,30 @@ num.times do |n|
     :medium_int_test => rand(8388607),
     :int_test => rand(2147483647),
     :big_int_test => rand(9223372036854775807),
-    :float_test => rand(32767)/1.87,
+    :float_test => rand(32767) / 1.87,
     :float_zero_test => 0.0,
-    :double_test => rand(8388607)/1.87,
-    :decimal_test => rand(8388607)/1.87,
+    :double_test => rand(8388607) / 1.87,
+    :decimal_test => rand(8388607) / 1.87,
     :decimal_zero_test => 0,
     :date_test => '2010-4-4',
     :date_time_test => '2010-4-4 11:44:00',
     :timestamp_test => '2010-4-4 11:44:00',
     :time_test => '11:44:00',
     :year_test => Time.now.year,
-    :char_test => five_words,
-    :varchar_test => five_words,
-    :binary_test => five_words,
-    :varbinary_test => five_words,
-    :tiny_blob_test => five_words,
-    :tiny_text_test => Faker::Lorem.paragraph(rand(5)),
+    :char_test => five_words.join.slice(0, 10), # CHAR(10)
+    :varchar_test => five_words.join.slice(0, 10), # VARCHAR(10)
+    :binary_test => five_words.join.byteslice(0, 10), # BINARY(10)
+    :varbinary_test => five_words.join.byteslice(0, 10), # VARBINARY(10)
+    :tiny_blob_test => five_words.join.byteslice(0, 255), # TINYBLOB
+    :tiny_text_test => Faker::Lorem.paragraph(rand(5)).byteslice(0, 255), # TINYTEXT
     :blob_test => twenty5_paragraphs,
     :text_test => twenty5_paragraphs,
     :medium_blob_test => twenty5_paragraphs,
     :medium_text_test => twenty5_paragraphs,
     :long_blob_test => twenty5_paragraphs,
     :long_text_test => twenty5_paragraphs,
-    :enum_test => ['val1', 'val2'][rand(2)],
-    :set_test => ['val1', 'val2', 'val1,val2'][rand(3)]
+    :enum_test => %w(val1 val2).sample,
+    :set_test => %w(val1 val2 val1,val2).sample,
   )
   if n % 100 == 0
     $stdout.putc '.'

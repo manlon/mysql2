@@ -1,4 +1,4 @@
-const char *mysql2_mysql_enc_to_rb[] = {
+static const char *mysql2_mysql_enc_to_rb[] = {
   "Big5",
   "ISO-8859-2",
   NULL,
@@ -247,4 +247,3 @@ const char *mysql2_mysql_enc_to_rb[] = {
   "UTF-8",
   "UTF-8"
 };
-
