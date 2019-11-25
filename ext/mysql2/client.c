@@ -15,11 +15,15 @@
 #include "mysql_enc_name_to_ruby.h"
 
 VALUE cMysql2Client;
-extern VALUE mMysql2, cMysql2Error, cMysql2TimeoutError;
+extern VALUE mMysql2, cMysql2Error;
 static VALUE sym_id, sym_version, sym_header_version, sym_async, sym_symbolize_keys, sym_as, sym_array, sym_stream;
-static VALUE sym_no_good_index_used, sym_no_index_used, sym_query_was_slow;
-static ID intern_brackets, intern_merge, intern_merge_bang, intern_new_with_args,
-  intern_current_query_options, intern_read_timeout;
+static ID intern_brackets, intern_merge, intern_merge_bang, intern_new_with_args;
+
+#ifndef HAVE_RB_HASH_DUP
+VALUE rb_hash_dup(VALUE other) {
+  return rb_funcall(rb_cHash, intern_brackets, 1, other);
+}
+#endif
 
 #define REQUIRE_INITIALIZED(wrapper) \
   if (!wrapper->initialized) { \
@@ -115,7 +119,7 @@ static VALUE rb_set_ssl_mode_option(VALUE self, VALUE setting) {
   int val = NUM2INT( setting );
   if (version >= 50703 && version < 50711) {
     if (val == SSL_MODE_DISABLED || val == SSL_MODE_REQUIRED) {
-      my_bool b = ( val == SSL_MODE_REQUIRED );
+      bool b = ( val == SSL_MODE_REQUIRED );
       int result = mysql_options( wrapper->client, MYSQL_OPT_SSL_ENFORCE, &b );
       return INT2NUM(result);
     } else {
@@ -174,8 +178,10 @@ static VALUE rb_raise_mysql2_error(mysql_client_wrapper *wrapper) {
   VALUE rb_sql_state = rb_tainted_str_new2(mysql_sqlstate(wrapper->client));
   VALUE e;
 
+#ifdef HAVE_RUBY_ENCODING_H
   rb_enc_associate(rb_error_msg, rb_utf8_encoding());
   rb_enc_associate(rb_sql_state, rb_usascii_encoding());
+#endif
 
   e = rb_funcall(cMysql2Error, intern_new_with_args, 4,
                  rb_error_msg,
@@ -351,7 +357,9 @@ static VALUE rb_mysql_client_escape(RB_MYSQL_UNUSED VALUE klass, VALUE str) {
     return str;
   } else {
     rb_str = rb_str_new((const char*)newStr, newLen);
+#ifdef HAVE_RUBY_ENCODING_H
     rb_enc_copy(rb_str, str);
+#endif
     xfree(newStr);
     return rb_str;
   }
@@ -378,7 +386,9 @@ static VALUE rb_mysql_info(VALUE self) {
   }
 
   rb_str = rb_str_new2(info);
+#ifdef HAVE_RUBY_ENCODING_H
   rb_enc_associate(rb_str, rb_utf8_encoding());
+#endif
 
   return rb_str;
 }
@@ -396,25 +406,14 @@ static VALUE rb_mysql_get_ssl_cipher(VALUE self)
   }
 
   rb_str = rb_str_new2(cipher);
+#ifdef HAVE_RUBY_ENCODING_H
   rb_enc_associate(rb_str, rb_utf8_encoding());
+#endif
 
   return rb_str;
 }
 
-#ifdef CLIENT_CONNECT_ATTRS
-static int opt_connect_attr_add_i(VALUE key, VALUE value, VALUE arg)
-{
-  mysql_client_wrapper *wrapper = (mysql_client_wrapper *)arg;
-  rb_encoding *enc = rb_to_encoding(wrapper->encoding);
-  key = rb_str_export_to_enc(key, enc);
-  value = rb_str_export_to_enc(value, enc);
-
-  mysql_options4(wrapper->client, MYSQL_OPT_CONNECT_ATTR_ADD, StringValueCStr(key), StringValueCStr(value));
-  return ST_CONTINUE;
-}
-#endif
-
-static VALUE rb_mysql_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE port, VALUE database, VALUE socket, VALUE flags, VALUE conn_attrs) {
+static VALUE rb_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VALUE port, VALUE database, VALUE socket, VALUE flags) {
   struct nogvl_connect_args args;
   time_t start_time, end_time, elapsed_time, connect_timeout;
   VALUE rv;
@@ -428,11 +427,6 @@ static VALUE rb_mysql_connect(VALUE self, VALUE user, VALUE pass, VALUE host, VA
   args.db          = NIL_P(database) ? NULL : StringValueCStr(database);
   args.mysql       = wrapper->client;
   args.client_flag = NUM2ULONG(flags);
-
-#ifdef CLIENT_CONNECT_ATTRS
-  mysql_options(wrapper->client, MYSQL_OPT_CONNECT_ATTR_RESET, 0);
-  rb_hash_foreach(conn_attrs, opt_connect_attr_add_i, (VALUE)wrapper);
-#endif
 
   if (wrapper->connect_timeout)
     time(&start_time);
@@ -527,7 +521,7 @@ static VALUE do_send_query(void *args) {
  */
 static void *nogvl_read_query_result(void *ptr) {
   MYSQL * client = ptr;
-  my_bool res = mysql_read_query_result(client);
+  bool res = mysql_read_query_result(client);
 
   return (void *)(res == 0 ? Qtrue : Qfalse);
 }
@@ -580,7 +574,7 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
     rb_raise_mysql2_error(wrapper);
   }
 
-  is_streaming = rb_hash_aref(rb_ivar_get(self, intern_current_query_options), sym_stream);
+  is_streaming = rb_hash_aref(rb_iv_get(self, "@current_query_options"), sym_stream);
   if (is_streaming == Qtrue) {
     result = (MYSQL_RES *)rb_thread_call_without_gvl(nogvl_use_result, wrapper, RUBY_UBF_IO, 0);
   } else {
@@ -596,13 +590,10 @@ static VALUE rb_mysql_client_async_result(VALUE self) {
     return Qnil;
   }
 
-  // Duplicate the options hash and put the copy in the Result object
-  current = rb_hash_dup(rb_ivar_get(self, intern_current_query_options));
+  current = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
   (void)RB_GC_GUARD(current);
   Check_Type(current, T_HASH);
   resultObj = rb_mysql_result_to_obj(self, wrapper->encoding, current, result, Qnil);
-
-  rb_mysql_set_server_query_flags(wrapper->client, resultObj);
 
   return resultObj;
 }
@@ -640,7 +631,7 @@ static VALUE do_query(void *args) {
   int retval;
   VALUE read_timeout;
 
-  read_timeout = rb_ivar_get(async_args->self, intern_read_timeout);
+  read_timeout = rb_iv_get(async_args->self, "@read_timeout");
 
   tvp = NULL;
   if (!NIL_P(read_timeout)) {
@@ -661,7 +652,7 @@ static VALUE do_query(void *args) {
     retval = rb_wait_for_single_fd(async_args->fd, RB_WAITFD_IN, tvp);
 
     if (retval == 0) {
-      rb_raise(cMysql2TimeoutError, "Timeout waiting for a response from the last query. (waited %d seconds)", FIX2INT(read_timeout));
+      rb_raise(cMysql2Error, "Timeout waiting for a response from the last query. (waited %d seconds)", FIX2INT(read_timeout));
     }
 
     if (retval < 0) {
@@ -756,7 +747,7 @@ static VALUE rb_mysql_client_abandon_results(VALUE self) {
  * Query the database with +sql+, with optional +options+.  For the possible
  * options, see default_query_options on the Mysql2::Client class.
  */
-static VALUE rb_mysql_query(VALUE self, VALUE sql, VALUE current) {
+static VALUE rb_query(VALUE self, VALUE sql, VALUE current) {
 #ifndef _WIN32
   struct async_query_args async_args;
 #endif
@@ -768,11 +759,15 @@ static VALUE rb_mysql_query(VALUE self, VALUE sql, VALUE current) {
 
   (void)RB_GC_GUARD(current);
   Check_Type(current, T_HASH);
-  rb_ivar_set(self, intern_current_query_options, current);
+  rb_iv_set(self, "@current_query_options", current);
 
   Check_Type(sql, T_STRING);
+#ifdef HAVE_RUBY_ENCODING_H
   /* ensure the string is in the encoding the connection is expecting */
   args.sql = rb_str_export_to_enc(sql, rb_to_encoding(wrapper->encoding));
+#else
+  args.sql = sql;
+#endif
   args.sql_ptr = RSTRING_PTR(args.sql);
   args.sql_len = RSTRING_LEN(args.sql);
   args.wrapper = wrapper;
@@ -809,16 +804,20 @@ static VALUE rb_mysql_client_real_escape(VALUE self, VALUE str) {
   unsigned char *newStr;
   VALUE rb_str;
   unsigned long newLen, oldLen;
+#ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *default_internal_enc;
   rb_encoding *conn_enc;
+#endif
   GET_CLIENT(self);
 
   REQUIRE_CONNECTED(wrapper);
   Check_Type(str, T_STRING);
+#ifdef HAVE_RUBY_ENCODING_H
   default_internal_enc = rb_default_internal_encoding();
   conn_enc = rb_to_encoding(wrapper->encoding);
   /* ensure the string is in the encoding the connection is expecting */
   str = rb_str_export_to_enc(str, conn_enc);
+#endif
 
   oldLen = RSTRING_LEN(str);
   newStr = xmalloc(oldLen*2+1);
@@ -826,17 +825,21 @@ static VALUE rb_mysql_client_real_escape(VALUE self, VALUE str) {
   newLen = mysql_real_escape_string(wrapper->client, (char *)newStr, RSTRING_PTR(str), oldLen);
   if (newLen == oldLen) {
     /* no need to return a new ruby string if nothing changed */
+#ifdef HAVE_RUBY_ENCODING_H
     if (default_internal_enc) {
       str = rb_str_export_to_enc(str, default_internal_enc);
     }
+#endif
     xfree(newStr);
     return str;
   } else {
     rb_str = rb_str_new((const char*)newStr, newLen);
+#ifdef HAVE_RUBY_ENCODING_H
     rb_enc_associate(rb_str, conn_enc);
     if (default_internal_enc) {
       rb_str = rb_str_export_to_enc(rb_str, default_internal_enc);
     }
+#endif
     xfree(newStr);
     return rb_str;
   }
@@ -847,7 +850,7 @@ static VALUE _mysql_client_options(VALUE self, int opt, VALUE value) {
   const void *retval = NULL;
   unsigned int intval = 0;
   const char * charval = NULL;
-  my_bool boolval;
+  bool boolval;
 
   GET_CLIENT(self);
 
@@ -904,11 +907,6 @@ static VALUE _mysql_client_options(VALUE self, int opt, VALUE value) {
       retval  = charval;
       break;
 
-    case MYSQL_DEFAULT_AUTH:
-      charval = (const char *)StringValueCStr(value);
-      retval  = charval;
-      break;
-
 #ifdef HAVE_CONST_MYSQL_ENABLE_CLEARTEXT_PLUGIN
     case MYSQL_ENABLE_CLEARTEXT_PLUGIN:
       boolval = (value == Qfalse ? 0 : 1);
@@ -952,8 +950,10 @@ static VALUE rb_mysql_client_info(RB_MYSQL_UNUSED VALUE klass) {
   version = rb_str_new2(mysql_get_client_info());
   header_version = rb_str_new2(MYSQL_LINK_VERSION);
 
+#ifdef HAVE_RUBY_ENCODING_H
   rb_enc_associate(version, rb_usascii_encoding());
   rb_enc_associate(header_version, rb_usascii_encoding());
+#endif
 
   rb_hash_aset(version_info, sym_id, LONG2NUM(mysql_get_client_version()));
   rb_hash_aset(version_info, sym_version, version);
@@ -969,21 +969,27 @@ static VALUE rb_mysql_client_info(RB_MYSQL_UNUSED VALUE klass) {
  */
 static VALUE rb_mysql_client_server_info(VALUE self) {
   VALUE version, server_info;
+#ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *default_internal_enc;
   rb_encoding *conn_enc;
+#endif
   GET_CLIENT(self);
 
   REQUIRE_CONNECTED(wrapper);
+#ifdef HAVE_RUBY_ENCODING_H
   default_internal_enc = rb_default_internal_encoding();
   conn_enc = rb_to_encoding(wrapper->encoding);
+#endif
 
   version = rb_hash_new();
   rb_hash_aset(version, sym_id, LONG2FIX(mysql_get_server_version(wrapper->client)));
   server_info = rb_str_new2(mysql_get_server_info(wrapper->client));
+#ifdef HAVE_RUBY_ENCODING_H
   rb_enc_associate(server_info, conn_enc);
   if (default_internal_enc) {
     server_info = rb_str_export_to_enc(server_info, default_internal_enc);
   }
+#endif
   rb_hash_aset(version, sym_version, server_info);
   return version;
 }
@@ -1105,23 +1111,6 @@ static VALUE rb_mysql_client_ping(VALUE self) {
 }
 
 /* call-seq:
- *    client.set_server_option(value)
- *
- * Enables or disables an option for the connection.
- * Read https://dev.mysql.com/doc/refman/5.7/en/mysql-set-server-option.html
- * for more information.
- */
-static VALUE rb_mysql_client_set_server_option(VALUE self, VALUE value) {
-  GET_CLIENT(self);
-
-  if (mysql_set_server_option(wrapper->client, NUM2INT(value)) == 0) {
-    return Qtrue;
-  } else {
-    return Qfalse;
-  }
-}
-
-/* call-seq:
  *    client.more_results?
  *
  * Returns true or false if there are more results to process.
@@ -1179,8 +1168,7 @@ static VALUE rb_mysql_client_store_result(VALUE self)
     return Qnil;
   }
 
-  // Duplicate the options hash and put the copy in the Result object
-  current = rb_hash_dup(rb_ivar_get(self, intern_current_query_options));
+  current = rb_hash_dup(rb_iv_get(self, "@current_query_options"));
   (void)RB_GC_GUARD(current);
   Check_Type(current, T_HASH);
   resultObj = rb_mysql_result_to_obj(self, wrapper->encoding, current, result, Qnil);
@@ -1188,6 +1176,7 @@ static VALUE rb_mysql_client_store_result(VALUE self)
   return resultObj;
 }
 
+#ifdef HAVE_RUBY_ENCODING_H
 /* call-seq:
  *    client.encoding
  *
@@ -1197,6 +1186,7 @@ static VALUE rb_mysql_client_encoding(VALUE self) {
   GET_CLIENT(self);
   return wrapper->encoding;
 }
+#endif
 
 /* call-seq:
  *    client.automatic_close?
@@ -1266,7 +1256,7 @@ static VALUE set_read_timeout(VALUE self, VALUE value) {
   /* Set the instance variable here even though _mysql_client_options
      might not succeed, because the timeout is used in other ways
      elsewhere */
-  rb_ivar_set(self, intern_read_timeout, value);
+  rb_iv_set(self, "@read_timeout", value);
   return _mysql_client_options(self, MYSQL_OPT_READ_TIMEOUT, value);
 }
 
@@ -1282,14 +1272,17 @@ static VALUE set_write_timeout(VALUE self, VALUE value) {
 
 static VALUE set_charset_name(VALUE self, VALUE value) {
   char *charset_name;
+#ifdef HAVE_RUBY_ENCODING_H
   const struct mysql2_mysql_enc_name_to_rb_map *mysql2rb;
   rb_encoding *enc;
   VALUE rb_enc;
+#endif
   GET_CLIENT(self);
 
   Check_Type(value, T_STRING);
   charset_name = RSTRING_PTR(value);
 
+#ifdef HAVE_RUBY_ENCODING_H
   mysql2rb = mysql2_mysql_enc_name_to_rb(charset_name, (unsigned int)RSTRING_LEN(value));
   if (mysql2rb == NULL || mysql2rb->rb_name == NULL) {
     VALUE inspect = rb_inspect(value);
@@ -1299,6 +1292,7 @@ static VALUE set_charset_name(VALUE self, VALUE value) {
     rb_enc = rb_enc_from_encoding(enc);
     wrapper->encoding = rb_enc;
   }
+#endif
 
   if (mysql_options(wrapper->client, MYSQL_SET_CHARSET_NAME, charset_name)) {
     /* TODO: warning - unable to set charset */
@@ -1340,10 +1334,6 @@ static VALUE set_read_default_group(VALUE self, VALUE value) {
 
 static VALUE set_init_command(VALUE self, VALUE value) {
   return _mysql_client_options(self, MYSQL_INIT_COMMAND, value);
-}
-
-static VALUE set_default_auth(VALUE self, VALUE value) {
-  return _mysql_client_options(self, MYSQL_DEFAULT_AUTH, value);
 }
 
 static VALUE set_enable_cleartext_plugin(VALUE self, VALUE value) {
@@ -1426,7 +1416,6 @@ void init_mysql2_client() {
   rb_define_method(cMysql2Client, "thread_id", rb_mysql_client_thread_id, 0);
   rb_define_method(cMysql2Client, "ping", rb_mysql_client_ping, 0);
   rb_define_method(cMysql2Client, "select_db", rb_mysql_client_select_db, 1);
-  rb_define_method(cMysql2Client, "set_server_option", rb_mysql_client_set_server_option, 1);
   rb_define_method(cMysql2Client, "more_results?", rb_mysql_client_more_results, 0);
   rb_define_method(cMysql2Client, "next_result", rb_mysql_client_next_result, 0);
   rb_define_method(cMysql2Client, "store_result", rb_mysql_client_store_result, 0);
@@ -1436,7 +1425,9 @@ void init_mysql2_client() {
   rb_define_method(cMysql2Client, "warning_count", rb_mysql_client_warning_count, 0);
   rb_define_method(cMysql2Client, "query_info_string", rb_mysql_info, 0);
   rb_define_method(cMysql2Client, "ssl_cipher", rb_mysql_get_ssl_cipher, 0);
+#ifdef HAVE_RUBY_ENCODING_H
   rb_define_method(cMysql2Client, "encoding", rb_mysql_client_encoding, 0);
+#endif
 
   rb_define_private_method(cMysql2Client, "connect_timeout=", set_connect_timeout, 1);
   rb_define_private_method(cMysql2Client, "read_timeout=", set_read_timeout, 1);
@@ -1447,13 +1438,12 @@ void init_mysql2_client() {
   rb_define_private_method(cMysql2Client, "default_file=", set_read_default_file, 1);
   rb_define_private_method(cMysql2Client, "default_group=", set_read_default_group, 1);
   rb_define_private_method(cMysql2Client, "init_command=", set_init_command, 1);
-  rb_define_private_method(cMysql2Client, "default_auth=", set_default_auth, 1);
   rb_define_private_method(cMysql2Client, "ssl_set", set_ssl_options, 5);
   rb_define_private_method(cMysql2Client, "ssl_mode=", rb_set_ssl_mode_option, 1);
   rb_define_private_method(cMysql2Client, "enable_cleartext_plugin=", set_enable_cleartext_plugin, 1);
   rb_define_private_method(cMysql2Client, "initialize_ext", initialize_ext, 0);
-  rb_define_private_method(cMysql2Client, "connect", rb_mysql_connect, 8);
-  rb_define_private_method(cMysql2Client, "_query", rb_mysql_query, 2);
+  rb_define_private_method(cMysql2Client, "connect", rb_connect, 7);
+  rb_define_private_method(cMysql2Client, "_query", rb_query, 2);
 
   sym_id              = ID2SYM(rb_intern("id"));
   sym_version         = ID2SYM(rb_intern("version"));
@@ -1464,16 +1454,10 @@ void init_mysql2_client() {
   sym_array           = ID2SYM(rb_intern("array"));
   sym_stream          = ID2SYM(rb_intern("stream"));
 
-  sym_no_good_index_used = ID2SYM(rb_intern("no_good_index_used"));
-  sym_no_index_used      = ID2SYM(rb_intern("no_index_used"));
-  sym_query_was_slow     = ID2SYM(rb_intern("query_was_slow"));
-
   intern_brackets = rb_intern("[]");
   intern_merge = rb_intern("merge");
   intern_merge_bang = rb_intern("merge!");
   intern_new_with_args = rb_intern("new_with_args");
-  intern_current_query_options = rb_intern("@current_query_options");
-  intern_read_timeout = rb_intern("@read_timeout");
 
 #ifdef CLIENT_LONG_PASSWORD
   rb_const_set(cMysql2Client, rb_intern("LONG_PASSWORD"),
@@ -1559,16 +1543,6 @@ void init_mysql2_client() {
   rb_const_set(cMysql2Client, rb_intern("SECURE_CONNECTION"), LONG2NUM(0));
 #endif
 
-#ifdef HAVE_CONST_MYSQL_OPTION_MULTI_STATEMENTS_ON
-  rb_const_set(cMysql2Client, rb_intern("OPTION_MULTI_STATEMENTS_ON"),
-      LONG2NUM(MYSQL_OPTION_MULTI_STATEMENTS_ON));
-#endif
-
-#ifdef HAVE_CONST_MYSQL_OPTION_MULTI_STATEMENTS_OFF
-  rb_const_set(cMysql2Client, rb_intern("OPTION_MULTI_STATEMENTS_OFF"),
-      LONG2NUM(MYSQL_OPTION_MULTI_STATEMENTS_OFF));
-#endif
-
 #ifdef CLIENT_MULTI_STATEMENTS
   rb_const_set(cMysql2Client, rb_intern("MULTI_STATEMENTS"),
       LONG2NUM(CLIENT_MULTI_STATEMENTS));
@@ -1599,16 +1573,6 @@ void init_mysql2_client() {
       LONG2NUM(CLIENT_BASIC_FLAGS));
 #endif
 
-#ifdef CLIENT_CONNECT_ATTRS
-  rb_const_set(cMysql2Client, rb_intern("CONNECT_ATTRS"),
-      LONG2NUM(CLIENT_CONNECT_ATTRS));
-#else
-  /* HACK because MySQL 5.5 and earlier don't define this constant,
-   * but we're using it in our default connection flags. */
-  rb_const_set(cMysql2Client, rb_intern("CONNECT_ATTRS"),
-      INT2NUM(0));
-#endif
-
 #if defined(FULL_SSL_MODE_SUPPORT) // MySQL 5.7.11 and above
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_DISABLED"), INT2NUM(SSL_MODE_DISABLED));
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_PREFERRED"), INT2NUM(SSL_MODE_PREFERRED));
@@ -1635,30 +1599,4 @@ void init_mysql2_client() {
 #ifndef HAVE_CONST_SSL_MODE_VERIFY_IDENTITY
   rb_const_set(cMysql2Client, rb_intern("SSL_MODE_VERIFY_IDENTITY"), INT2NUM(0));
 #endif
-}
-
-#define flag_to_bool(f) ((client->server_status & f) ? Qtrue : Qfalse)
-
-void rb_mysql_set_server_query_flags(MYSQL *client, VALUE result) {
-  VALUE server_flags = rb_hash_new();
-
-#ifdef HAVE_CONST_SERVER_QUERY_NO_GOOD_INDEX_USED
-  rb_hash_aset(server_flags, sym_no_good_index_used, flag_to_bool(SERVER_QUERY_NO_GOOD_INDEX_USED));
-#else
-  rb_hash_aset(server_flags, sym_no_good_index_used, Qnil);
-#endif
-
-#ifdef HAVE_CONST_SERVER_QUERY_NO_INDEX_USED
-  rb_hash_aset(server_flags, sym_no_index_used, flag_to_bool(SERVER_QUERY_NO_INDEX_USED));
-#else
-  rb_hash_aset(server_flags, sym_no_index_used, Qnil);
-#endif
-
-#ifdef HAVE_CONST_SERVER_QUERY_WAS_SLOW
-  rb_hash_aset(server_flags, sym_query_was_slow, flag_to_bool(SERVER_QUERY_WAS_SLOW));
-#else
-  rb_hash_aset(server_flags, sym_query_was_slow, Qnil);
-#endif
-
-  rb_iv_set(result, "@server_flags", server_flags);
 }

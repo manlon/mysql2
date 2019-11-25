@@ -1,3 +1,5 @@
+# encoding: UTF-8
+
 require 'spec_helper'
 
 RSpec.describe Mysql2::Error do
@@ -40,6 +42,8 @@ RSpec.describe Mysql2::Error do
     end
 
     before do
+      pending('String#encoding is not defined') unless String.public_method_defined?(:encoding)
+
       # sanity check
       expect(valid_utf8.encoding).to eql(Encoding::UTF_8)
       expect(valid_utf8).to be_valid_encoding

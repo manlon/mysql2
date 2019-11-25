@@ -1,5 +1,7 @@
+# encoding: UTF-8
 require 'date'
 require 'bigdecimal'
+require 'rational' unless RUBY_VERSION >= '1.9.2'
 
 # Load libmysql.dll before requiring mysql2/mysql2.so
 # This gives a chance to be flexible about the load path
@@ -11,23 +13,16 @@ if RUBY_PLATFORM =~ /mswin|mingw/
     ENV['RUBY_MYSQL2_LIBMYSQL_DLL']
   elsif File.exist?(File.expand_path('../vendor/libmysql.dll', File.dirname(__FILE__)))
     # Use vendor/libmysql.dll if it exists, convert slashes for Win32 LoadLibrary
-    File.expand_path('../vendor/libmysql.dll', File.dirname(__FILE__))
-  elsif defined?(RubyInstaller)
-    # RubyInstaller-2.4+ native build doesn't need DLL preloading
+    File.expand_path('../vendor/libmysql.dll', File.dirname(__FILE__)).tr('/', '\\')
   else
     # This will use default / system library paths
     'libmysql.dll'
   end
 
-  if dll_path
-    require 'fiddle'
-    kernel32 = Fiddle.dlopen 'kernel32'
-    load_library = Fiddle::Function.new(
-      kernel32['LoadLibraryW'], [Fiddle::TYPE_VOIDP], Fiddle::TYPE_INT,
-    )
-    if load_library.call(dll_path.encode('utf-16le')).zero?
-      abort "Failed to load libmysql.dll from #{dll_path}"
-    end
+  require 'Win32API'
+  LoadLibrary = Win32API.new('Kernel32', 'LoadLibrary', ['P'], 'I')
+  if 0 == LoadLibrary.call(dll_path)
+    abort "Failed to load libmysql.dll from #{dll_path}"
   end
 end
 
@@ -76,11 +71,14 @@ module Mysql2
     # Timeout::ExitException was removed in Ruby 2.3.0, 2.2.3, and 2.1.8,
     # but is present in earlier 2.1.x and 2.2.x, so we provide a shim.
     #
-    require 'timeout'
-    TIMEOUT_ERROR_CLASS = if defined?(::Timeout::ExitException)
-      ::Timeout::ExitException
-    else
-      ::Timeout::Error
+    if Thread.respond_to?(:handle_interrupt)
+      require 'timeout'
+      # rubocop:disable Style/ConstantName
+      TimeoutError = if defined?(::Timeout::ExitException)
+        ::Timeout::ExitException
+      else
+        ::Timeout::Error
+      end
     end
   end
 end

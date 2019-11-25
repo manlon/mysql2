@@ -1,3 +1,5 @@
+# encoding: UTF-8
+
 require 'rspec'
 require 'mysql2'
 require 'timeout'
@@ -31,23 +33,6 @@ RSpec.configure do |config|
     ensure
       client.close
       @clients.delete(client)
-    end
-  end
-
-  def num_classes
-    # rubocop:disable Lint/UnifiedInteger
-    0.class == Integer ? [Integer] : [Fixnum, Bignum]
-    # rubocop:enable Lint/UnifiedInteger
-  end
-
-  # Use monotonic time if possible (ruby >= 2.1.0)
-  if defined?(Process::CLOCK_MONOTONIC)
-    def clock_time
-      Process.clock_gettime Process::CLOCK_MONOTONIC
-    end
-  else
-    def clock_time
-      Time.now.to_f
     end
   end
 

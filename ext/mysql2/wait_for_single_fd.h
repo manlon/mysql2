@@ -1,6 +1,5 @@
 /*
- * backwards compatibility for Rubinius. See
- * https://github.com/rubinius/rubinius/issues/3771.
+ * backwards compatibility for pre-1.9.3 C API
  *
  * Ruby 1.9.3 provides this API which allows the use of ppoll() on Linux
  * to minimize select() and malloc() overhead on high-numbered FDs.
