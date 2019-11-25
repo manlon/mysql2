@@ -7,7 +7,7 @@ The Mysql2 gem is meant to serve the extremely common use-case of connecting, qu
 Some database libraries out there serve as direct 1:1 mappings of the already complex C APIs available.
 This one is not.
 
-It also forces the use of UTF-8 [or binary] for the connection [and all strings in 1.9, unless Encoding.default_internal is set then it'll convert from UTF-8 to that encoding] and uses encoding-aware MySQL API calls where it can.
+It also forces the use of UTF-8 [or binary] for the connection and uses encoding-aware MySQL API calls where it can.
 
 The API consists of three classes:
 
@@ -18,16 +18,18 @@ The API consists of three classes:
 `Mysql2::Statement` - returned from issuing a #prepare on the connection. Execute the statement to get a Result.
 
 ## Installing
+
 ### General Instructions
+
 ``` sh
 gem install mysql2
 ```
 
 This gem links against MySQL's `libmysqlclient` library or `Connector/C`
 library, and compatible alternatives such as MariaDB.
-You may need to install a package such as `libmysqlclient-dev`, `mysql-devel`,
-or other appropriate package for your system. See below for system-specific
-instructions.
+You may need to install a package such as `libmariadb-dev`, `libmysqlclient-dev`,
+`mysql-devel`, or other appropriate package for your system. See below for
+system-specific instructions.
 
 By default, the mysql2 gem will try to find a copy of MySQL in this order:
 
@@ -74,10 +76,11 @@ To see line numbers in backtraces, declare these environment variables
 
 ### Linux and other Unixes
 
-You may need to install a package such as `libmysqlclient-dev` or `mysql-devel`;
-refer to your distribution's package guide to find the particular package.
-The most common issue we see is a user who has the library file `libmysqlclient.so` but is
-missing the header file `mysql.h` -- double check that you have the _-dev_ packages installed.
+You may need to install a package such as `libmariadb-dev`, `libmysqlclient-dev`,
+`mysql-devel`, or `default-libmysqlclient-dev`; refer to your distribution's package guide to
+find the particular package. The most common issue we see is a user who has
+the library file `libmysqlclient.so` but is missing the header file `mysql.h`
+-- double check that you have the _-dev_ packages installed.
 
 ### Mac OS X
 
@@ -89,6 +92,7 @@ If you have not done so already, you will need to install the XCode select tools
 `xcode-select --install`.
 
 ### Windows
+
 Make sure that you have Ruby and the DevKit compilers installed. We recommend
 the [Ruby Installer](http://rubyinstaller.org) distribution.
 
@@ -138,7 +142,7 @@ results.each do |row|
   # conveniently, row is a hash
   # the keys are the fields, as you'd expect
   # the values are pre-built ruby primitives mapped from their corresponding field types in MySQL
-  puts row["id"] # row["id"].class == Fixnum
+  puts row["id"] # row["id"].is_a? Integer
   if row["dne"]  # non-existant hash entry is nil
     puts row["dne"]
   end
@@ -156,7 +160,7 @@ end
 How about with symbolized keys?
 
 ``` ruby
-client.query("SELECT * FROM users WHERE group='githubbers'", :symbolize_keys => true) do |row|
+client.query("SELECT * FROM users WHERE group='githubbers'", :symbolize_keys => true).each do |row|
   # do something with row, it's ready to rock
 end
 ```
@@ -175,7 +179,11 @@ end
 Prepared statements are supported, as well. In a prepared statement, use a `?`
 in place of each value and then execute the statement to retrieve a result set.
 Pass your arguments to the execute method in the same number and order as the
-question marks in the statement.
+question marks in the statement. Query options can be passed as keyword arguments
+to the execute method.
+
+Be sure to read about the known limitations of prepared statements at
+[https://dev.mysql.com/doc/refman/5.6/en/c-api-prepared-statement-problems.html](https://dev.mysql.com/doc/refman/5.6/en/c-api-prepared-statement-problems.html)
 
 ``` ruby
 statement = @client.prepare("SELECT * FROM users WHERE login_count = ?")
@@ -184,6 +192,9 @@ result2 = statement.execute(2)
 
 statement = @client.prepare("SELECT * FROM users WHERE last_login >= ? AND location LIKE ?")
 result = statement.execute(1, "CA")
+
+statement = @client.prepare("SELECT * FROM users WHERE last_login >= ? AND location LIKE ?")
+result = statement.execute(1, "CA", :as => :array)
 ```
 
 ## Connection options
@@ -203,12 +214,14 @@ Mysql2::Client.new(
   :read_timeout = seconds,
   :write_timeout = seconds,
   :connect_timeout = seconds,
+  :connect_attrs = {:program_name => $PROGRAM_NAME, ...},
   :reconnect = true/false,
   :local_infile = true/false,
   :secure_auth = true/false,
   :ssl_mode = :disabled / :preferred / :required / :verify_ca / :verify_identity,
   :default_file = '/path/to/my.cfg',
   :default_group = 'my.cfg section',
+  :default_auth = 'authentication_windows_client'
   :init_command => sql
   )
 ```
@@ -265,8 +278,10 @@ The string form will be split on whitespace and parsed as with the array form:
 Plain flags are added to the default flags, while flags prefixed with `-`
 (minus) are removed from the default flags.
 
-This allows easier use with ActiveRecord's database.yml, avoiding the need for magic flag numbers.
-For example, to disable protocol compression, and enable multiple statements and result sets:
+### Using Active Record's database.yml
+
+Active Record typically reads its configuration from a file named `database.yml` or an environment variable `DATABASE_URL`.
+Use the value `mysql2` as the adapter name. For example:
 
 ``` yaml
 development:
@@ -282,6 +297,15 @@ development:
     - FOUND_ROWS
     - MULTI_STATEMENTS
   secure_auth: false
+```
+
+### Using Active Record's DATABASE_URL
+
+Active Record typically reads its configuration from a file named `database.yml` or an environment variable `DATABASE_URL`.
+Use the value `mysql2` as the protocol name. For example:
+
+``` shell
+DATABASE_URL=mysql2://sql_user:sql_pass@sql_host_name:port/sql_db_name?option1=value1&option2=value2
 ```
 
 ### Reading a MySQL config file
@@ -338,7 +362,8 @@ end
 ```
 
 Yields:
-```
+
+```ruby
 {"1"=>1}
 {"2"=>2}
 next_result: Unknown column 'A' in 'field list' (Mysql2::Error)
@@ -379,6 +404,15 @@ or
 # this will set the options for the Mysql2::Result instance returned from the #query method
 c = Mysql2::Client.new
 c.query(sql, :symbolize_keys => true)
+```
+
+or
+
+``` ruby
+# this will set the options for the Mysql2::Result instance returned from the #execute method
+c = Mysql2::Client.new
+s = c.prepare(sql)
+s.execute(arg1, args2, :symbolize_keys => true)
 ```
 
 ## Result types
@@ -488,7 +522,7 @@ There are a few things that need to be kept in mind while using streaming:
 * `:cache_rows` is ignored currently. (if you want to use `:cache_rows` you probably don't want to be using `:stream`)
 * You must fetch all rows in the result set of your query before you can make new queries. (i.e. with `Mysql2::Result#each`)
 
-Read more about the consequences of using `mysql_use_result` (what streaming is implemented with) here: http://dev.mysql.com/doc/refman/5.0/en/mysql-use-result.html.
+Read more about the consequences of using `mysql_use_result` (what streaming is implemented with) here: [http://dev.mysql.com/doc/refman/5.0/en/mysql-use-result.html](http://dev.mysql.com/doc/refman/5.0/en/mysql-use-result.html).
 
 ### Lazy Everything
 
@@ -509,21 +543,21 @@ As for field values themselves, I'm workin on it - but expect that soon.
 
 This gem is tested with the following Ruby versions on Linux and Mac OS X:
 
- * Ruby MRI 1.8.7, 1.9.3, 2.0.0, 2.1.x, 2.2.x, 2.3.x, 2.4.x
- * Ruby Enterprise Edition (based on MRI 1.8.7)
- * Rubinius 2.x and 3.x do work but may fail under some workloads
+* Ruby MRI 2.0.0, 2.1.x, 2.2.x, 2.3.x, 2.4.x, 2.5.x, 2.6.x
+* Rubinius 2.x and 3.x do work but may fail under some workloads
 
 This gem is tested with the following MySQL and MariaDB versions:
 
- * MySQL 5.5, 5.6, 5.7, 8.0
- * MySQL Connector/C 6.0 and 6.1 (primarily on Windows)
- * MariaDB 5.5, 10.0, 10.1
+* MySQL 5.5, 5.6, 5.7, 8.0
+* MySQL Connector/C 6.0 and 6.1 (primarily on Windows)
+* MariaDB 5.5, 10.0, 10.1, 10.2, 10.3
 
 ### Ruby on Rails / Active Record
 
- * mysql2 0.4.x works with Rails / Active Record 4.2.5 - 5.0 and higher.
- * mysql2 0.3.x works with Rails / Active Record 3.1, 3.2, 4.x, 5.0.
- * mysql2 0.2.x works with Rails / Active Record 2.3 - 3.0.
+* mysql2 0.5.x works with Rails / Active Record 5.0.7, 5.1.6, and higher.
+* mysql2 0.4.x works with Rails / Active Record 4.2.5 - 5.0 and higher.
+* mysql2 0.3.x works with Rails / Active Record 3.1, 3.2, 4.x, 5.0.
+* mysql2 0.2.x works with Rails / Active Record 2.3 - 3.0.
 
 ### Asynchronous Active Record
 
@@ -606,11 +640,11 @@ though.
 ## Special Thanks
 
 * Eric Wong - for the contribution (and the informative explanations) of some thread-safety, non-blocking I/O and cleanup patches. You rock dude
-* Yury Korolev (http://github.com/yury) - for TONS of help testing the Active Record adapter
-* Aaron Patterson (http://github.com/tenderlove) - tons of contributions, suggestions and general badassness
-* Mike Perham (http://github.com/mperham) - Async Active Record adapter (uses Fibers and EventMachine)
-* Aaron Stone (http://github.com/sodabrew) - additional client settings, local files, microsecond time, maintenance support
-* Kouhei Ueno (https://github.com/nyaxt) - for the original work on Prepared Statements way back in 2012
-* John Cant (http://github.com/johncant) - polishing and updating Prepared Statements support
-* Justin Case (http://github.com/justincase) - polishing and updating Prepared Statements support and getting it merged
-* Tamir Duberstein (http://github.com/tamird) - for help with timeouts and all around updates and cleanups
+* [Yury Korolev](http://github.com/yury) - for TONS of help testing the Active Record adapter
+* [Aaron Patterson](http://github.com/tenderlove) - tons of contributions, suggestions and general badassness
+* [Mike Perham](http://github.com/mperham) - Async Active Record adapter (uses Fibers and EventMachine)
+* [Aaron Stone](http://github.com/sodabrew) - additional client settings, local files, microsecond time, maintenance support
+* [Kouhei Ueno](https://github.com/nyaxt) - for the original work on Prepared Statements way back in 2012
+* [John Cant](http://github.com/johncant) - polishing and updating Prepared Statements support
+* [Justin Case](http://github.com/justincase) - polishing and updating Prepared Statements support and getting it merged
+* [Tamir Duberstein](http://github.com/tamird) - for help with timeouts and all around updates and cleanups

@@ -17,12 +17,8 @@ void Init_mysql2(void);
 #include <mysql/errmsg.h>
 #endif
 
-#ifdef HAVE_RUBY_ENCODING_H
 #include <ruby/encoding.h>
-#endif
-#ifdef HAVE_RUBY_THREAD_H
 #include <ruby/thread.h>
-#endif
 
 #if defined(__GNUC__) && (__GNUC__ >= 3)
 #define RB_MYSQL_NORETURN __attribute__ ((noreturn))
@@ -30,6 +26,14 @@ void Init_mysql2(void);
 #else
 #define RB_MYSQL_NORETURN
 #define RB_MYSQL_UNUSED
+#endif
+
+/* MySQL 8.0 replaces my_bool with C99 bool. Earlier versions of MySQL had
+ * a typedef to char. Gem users reported failures on big endian systems when
+ * using C99 bool types with older MySQLs due to mismatched behavior. */
+#ifndef HAVE_TYPE_MY_BOOL
+#include <stdbool.h>
+typedef bool my_bool;
 #endif
 
 #include <client.h>

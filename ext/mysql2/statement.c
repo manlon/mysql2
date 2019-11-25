@@ -1,12 +1,10 @@
 #include <mysql2_ext.h>
 
-VALUE cMysql2Statement;
-extern VALUE mMysql2, cMysql2Error, cBigDecimal, cDateTime, cDate;
-static VALUE sym_stream, intern_new_with_args, intern_each, intern_to_s;
-static VALUE intern_sec_fraction, intern_usec, intern_sec, intern_min, intern_hour, intern_day, intern_month, intern_year;
-#ifndef HAVE_RB_BIG_CMP
-static ID id_cmp;
-#endif
+extern VALUE mMysql2, cMysql2Error;
+static VALUE cMysql2Statement, cBigDecimal, cDateTime, cDate;
+static VALUE sym_stream, intern_new_with_args, intern_each, intern_to_s, intern_merge_bang;
+static VALUE intern_sec_fraction, intern_usec, intern_sec, intern_min, intern_hour, intern_day, intern_month, intern_year,
+  intern_query_options;
 
 #define GET_STATEMENT(self) \
   mysql_stmt_wrapper *stmt_wrapper; \
@@ -21,7 +19,7 @@ static void rb_mysql_stmt_mark(void * ptr) {
   rb_gc_mark(stmt_wrapper->client);
 }
 
-static void *nogvl_stmt_close(void * ptr) {
+static void *nogvl_stmt_close(void *ptr) {
   mysql_stmt_wrapper *stmt_wrapper = ptr;
   if (stmt_wrapper->stmt) {
     mysql_stmt_close(stmt_wrapper->stmt);
@@ -30,7 +28,7 @@ static void *nogvl_stmt_close(void * ptr) {
   return NULL;
 }
 
-static void rb_mysql_stmt_free(void * ptr) {
+static void rb_mysql_stmt_free(void *ptr) {
   mysql_stmt_wrapper *stmt_wrapper = ptr;
   decr_mysql2_stmt(stmt_wrapper);
 }
@@ -50,7 +48,6 @@ void rb_raise_mysql2_stmt_error(mysql_stmt_wrapper *stmt_wrapper) {
   VALUE rb_error_msg = rb_str_new2(mysql_stmt_error(stmt_wrapper->stmt));
   VALUE rb_sql_state = rb_tainted_str_new2(mysql_stmt_sqlstate(stmt_wrapper->stmt));
 
-#ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *conn_enc;
   conn_enc = rb_to_encoding(wrapper->encoding);
 
@@ -62,7 +59,6 @@ void rb_raise_mysql2_stmt_error(mysql_stmt_wrapper *stmt_wrapper) {
     rb_error_msg = rb_str_export_to_enc(rb_error_msg, default_internal_enc);
     rb_sql_state = rb_str_export_to_enc(rb_sql_state, default_internal_enc);
   }
-#endif
 
   e = rb_funcall(cMysql2Error, intern_new_with_args, 4,
                  rb_error_msg,
@@ -96,9 +92,7 @@ static void *nogvl_prepare_statement(void *ptr) {
 VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
   mysql_stmt_wrapper *stmt_wrapper;
   VALUE rb_stmt;
-#ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *conn_enc;
-#endif
 
   Check_Type(sql, T_STRING);
 
@@ -114,9 +108,7 @@ VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
   {
     GET_CLIENT(rb_client);
     stmt_wrapper->stmt = mysql_stmt_init(wrapper->client);
-#ifdef HAVE_RUBY_ENCODING_H
     conn_enc = rb_to_encoding(wrapper->encoding);
-#endif
   }
   if (stmt_wrapper->stmt == NULL) {
     rb_raise(cMysql2Error, "Unable to initialize prepared statement: out of memory");
@@ -124,7 +116,7 @@ VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
 
   // set STMT_ATTR_UPDATE_MAX_LENGTH attr
   {
-    bool truth = 1;
+    my_bool truth = 1;
     if (mysql_stmt_attr_set(stmt_wrapper->stmt, STMT_ATTR_UPDATE_MAX_LENGTH, &truth)) {
       rb_raise(cMysql2Error, "Unable to initialize prepared statement: set STMT_ATTR_UPDATE_MAX_LENGTH");
     }
@@ -134,11 +126,8 @@ VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
   {
     struct nogvl_prepare_statement_args args;
     args.stmt = stmt_wrapper->stmt;
-    args.sql = sql;
-#ifdef HAVE_RUBY_ENCODING_H
     // ensure the string is in the encoding the connection is expecting
-    args.sql = rb_str_export_to_enc(args.sql, conn_enc);
-#endif
+    args.sql = rb_str_export_to_enc(sql, conn_enc);
     args.sql_ptr = RSTRING_PTR(sql);
     args.sql_len = RSTRING_LEN(sql);
 
@@ -154,7 +143,7 @@ VALUE rb_mysql_stmt_new(VALUE rb_client, VALUE sql) {
  *
  * Returns the number of parameters the prepared statement expects.
  */
-static VALUE param_count(VALUE self) {
+static VALUE rb_mysql_stmt_param_count(VALUE self) {
   GET_STATEMENT(self);
 
   return ULL2NUM(mysql_stmt_param_count(stmt_wrapper->stmt));
@@ -164,13 +153,13 @@ static VALUE param_count(VALUE self) {
  *
  * Returns the number of fields the prepared statement returns.
  */
-static VALUE field_count(VALUE self) {
+static VALUE rb_mysql_stmt_field_count(VALUE self) {
   GET_STATEMENT(self);
 
   return UINT2NUM(mysql_stmt_field_count(stmt_wrapper->stmt));
 }
 
-static void *nogvl_execute(void *ptr) {
+static void *nogvl_stmt_execute(void *ptr) {
   MYSQL_STMT *stmt = ptr;
 
   if (mysql_stmt_execute(stmt)) {
@@ -196,7 +185,7 @@ static void set_buffer_for_string(MYSQL_BIND* bind_buffer, unsigned long *length
  * the buffer is a Ruby string pointer and not our memory to manage.
  */
 #define FREE_BINDS                                          \
-  for (i = 0; i < argc; i++) {                              \
+  for (i = 0; i < bind_count; i++) {                        \
     if (bind_buffers[i].buffer && NIL_P(params_enc[i])) {   \
       xfree(bind_buffers[i].buffer);                        \
     }                                                       \
@@ -211,6 +200,8 @@ static int my_big2ll(VALUE bignum, LONG_LONG *ptr)
 {
   unsigned LONG_LONG num;
   size_t len;
+// rb_absint_size was added in 2.1.0. See:
+// https://github.com/ruby/ruby/commit/9fea875
 #ifdef HAVE_RB_ABSINT_SIZE
   int nlz_bits = 0;
   len = rb_absint_size(bignum, &nlz_bits);
@@ -229,16 +220,15 @@ static int my_big2ll(VALUE bignum, LONG_LONG *ptr)
 #ifdef HAVE_RB_ABSINT_SIZE
         nlz_bits == 0 &&
 #endif
+// rb_absint_singlebit_p was added in 2.1.0. See:
+// https://github.com/ruby/ruby/commit/e5ff9d5
 #if defined(HAVE_RB_ABSINT_SIZE) && defined(HAVE_RB_ABSINT_SINGLEBIT_P)
         /* Optimized to avoid object allocation for Ruby 2.1+
          * only -0x8000000000000000 is safe if `len == 8 && nlz_bits == 0`
          */
         !rb_absint_singlebit_p(bignum)
-#elif defined(HAVE_RB_BIG_CMP)
-        rb_big_cmp(bignum, LL2NUM(LLONG_MIN)) == INT2FIX(-1)
 #else
-        /* Ruby 1.8.7 and REE doesn't have rb_big_cmp */
-        rb_funcall(bignum, id_cmp, 1, LL2NUM(LLONG_MIN)) == INT2FIX(-1)
+        rb_big_cmp(bignum, LL2NUM(LLONG_MIN)) == INT2FIX(-1)
 #endif
        ) {
       goto overflow;
@@ -254,44 +244,45 @@ overflow:
  *
  * Executes the current prepared statement, returns +result+.
  */
-static VALUE execute(int argc, VALUE *argv, VALUE self) {
+static VALUE rb_mysql_stmt_execute(int argc, VALUE *argv, VALUE self) {
   MYSQL_BIND *bind_buffers = NULL;
   unsigned long *length_buffers = NULL;
   unsigned long bind_count;
-  long i;
+  unsigned long i;
   MYSQL_STMT *stmt;
   MYSQL_RES *metadata;
+  VALUE opts;
   VALUE current;
   VALUE resultObj;
-  VALUE *params_enc;
+  VALUE *params_enc = NULL;
   int is_streaming;
-#ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *conn_enc;
-#endif
 
   GET_STATEMENT(self);
   GET_CLIENT(stmt_wrapper->client);
 
-#ifdef HAVE_RUBY_ENCODING_H
   conn_enc = rb_to_encoding(wrapper->encoding);
-#endif
-
-  /* Scratch space for string encoding exports, allocate on the stack. */
-  params_enc = alloca(sizeof(VALUE) * argc);
 
   stmt = stmt_wrapper->stmt;
-
   bind_count = mysql_stmt_param_count(stmt);
-  if (argc != (long)bind_count) {
-    rb_raise(cMysql2Error, "Bind parameter count (%ld) doesn't match number of arguments (%d)", bind_count, argc);
+
+  // Get count of ordinary arguments, and extract hash opts/keyword arguments
+  // Use a local scope to avoid leaking the temporary count variable
+  {
+    int c = rb_scan_args(argc, argv, "*:", NULL, &opts);
+    if (c != (long)bind_count) {
+      rb_raise(cMysql2Error, "Bind parameter count (%ld) doesn't match number of arguments (%d)", bind_count, c);
+    }
   }
 
   // setup any bind variables in the query
   if (bind_count > 0) {
+    // Scratch space for string encoding exports, allocate on the stack
+    params_enc = alloca(sizeof(VALUE) * bind_count);
     bind_buffers = xcalloc(bind_count, sizeof(MYSQL_BIND));
     length_buffers = xcalloc(bind_count, sizeof(unsigned long));
 
-    for (i = 0; i < argc; i++) {
+    for (i = 0; i < bind_count; i++) {
       bind_buffers[i].buffer = NULL;
       params_enc[i] = Qnil;
 
@@ -319,12 +310,8 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
               *(LONG_LONG*)(bind_buffers[i].buffer) = num;
             } else {
               /* The bignum was larger than we can fit in LONG_LONG, send it as a string */
-              VALUE rb_val_as_string = rb_big2str(argv[i], 10);
               bind_buffers[i].buffer_type = MYSQL_TYPE_NEWDECIMAL;
-              params_enc[i] = rb_val_as_string;
-#ifdef HAVE_RUBY_ENCODING_H
-              params_enc[i] = rb_str_export_to_enc(params_enc[i], conn_enc);
-#endif
+              params_enc[i] = rb_str_export_to_enc(rb_big2str(argv[i], 10), conn_enc);
               set_buffer_for_string(&bind_buffers[i], &length_buffers[i], params_enc[i]);
             }
           }
@@ -338,9 +325,7 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
           bind_buffers[i].buffer_type = MYSQL_TYPE_STRING;
 
           params_enc[i] = argv[i];
-#ifdef HAVE_RUBY_ENCODING_H
           params_enc[i] = rb_str_export_to_enc(params_enc[i], conn_enc);
-#endif
           set_buffer_for_string(&bind_buffers[i], &length_buffers[i], params_enc[i]);
           break;
         case T_TRUE:
@@ -405,9 +390,7 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
             VALUE rb_val_as_string = rb_funcall(argv[i], intern_to_s, 0);
 
             params_enc[i] = rb_val_as_string;
-#ifdef HAVE_RUBY_ENCODING_H
             params_enc[i] = rb_str_export_to_enc(params_enc[i], conn_enc);
-#endif
             set_buffer_for_string(&bind_buffers[i], &length_buffers[i], params_enc[i]);
           }
           break;
@@ -421,7 +404,40 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
     }
   }
 
-  if ((VALUE)rb_thread_call_without_gvl(nogvl_execute, stmt, RUBY_UBF_IO, 0) == Qfalse) {
+  // Duplicate the options hash, merge! extra opts, put the copy into the Result object
+  current = rb_hash_dup(rb_ivar_get(stmt_wrapper->client, intern_query_options));
+  (void)RB_GC_GUARD(current);
+  Check_Type(current, T_HASH);
+
+  // Merge in hash opts/keyword arguments
+  if (!NIL_P(opts)) {
+    rb_funcall(current, intern_merge_bang, 1, opts);
+  }
+
+  is_streaming = (Qtrue == rb_hash_aref(current, sym_stream));
+
+  // From stmt_execute to mysql_stmt_result_metadata to stmt_store_result, no
+  // Ruby API calls are allowed so that GC is not invoked. If the connection is
+  // in results-streaming-mode for Statement A, and in the middle Statement B
+  // gets garbage collected, a message will be sent to the server notifying it
+  // to release Statement B, resulting in the following error:
+  //   Commands out of sync; you can't run this command now
+  //
+  // In streaming mode, statement execute must return a cursor because we
+  // cannot prevent other Statement objects from being garbage collected
+  // between fetches of each row of the result set. The following error
+  // occurs if cursor mode is not set:
+  //   Row retrieval was canceled by mysql_stmt_close
+
+  if (is_streaming) {
+    unsigned long type = CURSOR_TYPE_READ_ONLY;
+    if (mysql_stmt_attr_set(stmt, STMT_ATTR_CURSOR_TYPE, &type)) {
+      FREE_BINDS;
+      rb_raise(cMysql2Error, "Unable to stream prepared statement, could not set CURSOR_TYPE_READ_ONLY");
+    }
+  }
+
+  if ((VALUE)rb_thread_call_without_gvl(nogvl_stmt_execute, stmt, RUBY_UBF_IO, 0) == Qfalse) {
     FREE_BINDS;
     rb_raise_mysql2_stmt_error(stmt_wrapper);
   }
@@ -439,11 +455,6 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
     return Qnil;
   }
 
-  current = rb_hash_dup(rb_iv_get(stmt_wrapper->client, "@query_options"));
-  (void)RB_GC_GUARD(current);
-  Check_Type(current, T_HASH);
-
-  is_streaming = (Qtrue == rb_hash_aref(current, sym_stream));
   if (!is_streaming) {
     // recieve the whole result set from the server
     if (mysql_stmt_store_result(stmt)) {
@@ -454,6 +465,8 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
   }
 
   resultObj = rb_mysql_result_to_obj(stmt_wrapper->client, wrapper->encoding, current, metadata, self);
+
+  rb_mysql_set_server_query_flags(wrapper->client, resultObj);
 
   if (!is_streaming) {
     // cache all result
@@ -467,27 +480,23 @@ static VALUE execute(int argc, VALUE *argv, VALUE self) {
  *
  * Returns a list of fields that will be returned by this statement.
  */
-static VALUE fields(VALUE self) {
+static VALUE rb_mysql_stmt_fields(VALUE self) {
   MYSQL_FIELD *fields;
   MYSQL_RES *metadata;
   unsigned int field_count;
   unsigned int i;
   VALUE field_list;
   MYSQL_STMT* stmt;
-#ifdef HAVE_RUBY_ENCODING_H
   rb_encoding *default_internal_enc, *conn_enc;
-#endif
   GET_STATEMENT(self);
   GET_CLIENT(stmt_wrapper->client);
   stmt = stmt_wrapper->stmt;
 
-#ifdef HAVE_RUBY_ENCODING_H
   default_internal_enc = rb_default_internal_encoding();
   {
     GET_CLIENT(stmt_wrapper->client);
     conn_enc = rb_to_encoding(wrapper->encoding);
   }
-#endif
 
   metadata = mysql_stmt_result_metadata(stmt);
   if (metadata == NULL) {
@@ -508,12 +517,10 @@ static VALUE fields(VALUE self) {
     VALUE rb_field;
 
     rb_field = rb_str_new(fields[i].name, fields[i].name_length);
-#ifdef HAVE_RUBY_ENCODING_H
     rb_enc_associate(rb_field, conn_enc);
     if (default_internal_enc) {
      rb_field = rb_str_export_to_enc(rb_field, default_internal_enc);
    }
-#endif
 
     rb_ary_store(field_list, (long)i, rb_field);
   }
@@ -564,12 +571,15 @@ static VALUE rb_mysql_stmt_close(VALUE self) {
 }
 
 void init_mysql2_statement() {
-  cMysql2Statement = rb_define_class_under(mMysql2, "Statement", rb_cObject);
+  cDate = rb_const_get(rb_cObject, rb_intern("Date"));
+  cDateTime = rb_const_get(rb_cObject, rb_intern("DateTime"));
+  cBigDecimal = rb_const_get(rb_cObject, rb_intern("BigDecimal"));
 
-  rb_define_method(cMysql2Statement, "param_count", param_count, 0);
-  rb_define_method(cMysql2Statement, "field_count", field_count, 0);
-  rb_define_method(cMysql2Statement, "_execute", execute, -1);
-  rb_define_method(cMysql2Statement, "fields", fields, 0);
+  cMysql2Statement = rb_define_class_under(mMysql2, "Statement", rb_cObject);
+  rb_define_method(cMysql2Statement, "param_count", rb_mysql_stmt_param_count, 0);
+  rb_define_method(cMysql2Statement, "field_count", rb_mysql_stmt_field_count, 0);
+  rb_define_method(cMysql2Statement, "_execute", rb_mysql_stmt_execute, -1);
+  rb_define_method(cMysql2Statement, "fields", rb_mysql_stmt_fields, 0);
   rb_define_method(cMysql2Statement, "last_id", rb_mysql_stmt_last_id, 0);
   rb_define_method(cMysql2Statement, "affected_rows", rb_mysql_stmt_affected_rows, 0);
   rb_define_method(cMysql2Statement, "close", rb_mysql_stmt_close, 0);
@@ -589,7 +599,6 @@ void init_mysql2_statement() {
   intern_year = rb_intern("year");
 
   intern_to_s = rb_intern("to_s");
-#ifndef HAVE_RB_BIG_CMP
-  id_cmp = rb_intern("<=>");
-#endif
+  intern_merge_bang = rb_intern("merge!");
+  intern_query_options = rb_intern("@query_options");
 }
