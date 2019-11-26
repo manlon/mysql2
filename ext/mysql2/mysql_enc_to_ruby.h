@@ -306,5 +306,6 @@ static const char *mysql2_mysql_enc_to_rb[] = {
   "UTF-8",
   "UTF-8",
   "UTF-8",
+  "UTF-8",
   "UTF-8"
 };
